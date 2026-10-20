@@ -2,6 +2,8 @@
 
 <img width="1544" height="213" alt="image" src="https://github.com/user-attachments/assets/cc08f13f-0809-4479-b400-baab3475180a" />
 
+<img width="919" height="281" alt="image" src="https://github.com/user-attachments/assets/e8413beb-43a4-4198-86bc-1b38671d8c4a" />
+
 #### Документация RL78:
 - [Protocol A](https://www.renesas.com/en/document/apn/rl78-microcontrollers-rl78-protocol-programmer-edition-application-note)
 - [RL78 Microcontroller (RL78 Protocol B) Serial Programming Guide](https://www.renesas.com/en/document/apn/rl78-family-rl78-microcontroller-rl78-protocol-b-serial-programming-guide)
