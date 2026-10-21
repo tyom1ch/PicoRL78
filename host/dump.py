@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-dump.py -- Glitch-scan + auto-dump RL78/F13 flash over OCD.
+dump.py -- Glitch-scan + auto-dump RL78 flash over OCD.
 
 Randomized fault injection on the ID compare, then reads flash in the same
 session. Uses 'Q' (fast, no identify) when fw >= 1.11, falls back to 'G'.
@@ -16,7 +16,9 @@ Flash read sequence (kirya-dev/PicoRL78, verified on RL78/F13):
     code flash into RAM 0xFC00, EXEC, READ 0xFC00.
 """
 import argparse
+import os
 import random
+import re
 import itertools
 import sys
 import time
@@ -25,12 +27,59 @@ from rl78bridge import RL78Bridge, BridgeError
 
 DEFAULT_OCD_ID = bytes(10)
 OCD_VOLTAGE = 50
+DF_BASE = 0xF1000
 OCD_CONNECT, OCD_READ, OCD_WRITE, OCD_EXEC = 0x91, 0x92, 0x93, 0x94
 NAMES = {0xF0: "UNLOCKED(F0)", 0xF1: "LOCKED(F1)", 0xF2: "UNLOCK-OK(F2)",
          0xF3: "AUTH-FAIL(F3)", 0xF4: "UNLOCK-NG(F4)"}
 
 
 def log(m): print(m, flush=True)
+
+
+def identify_chip(b):
+    """Enter programming mode (0x3A), read Silicon Signature via Protocol A."""
+    from rl78_proto import Link, ProtoA, MODE_A_1WIRE, ST_ACK
+
+    b.set_baud(115200)
+    b.enter(MODE_A_1WIRE)
+    link = Link(b, trace=False)
+    a = ProtoA(link)
+    st = a.set_baudrate(115200, voltage=OCD_VOLTAGE)
+    if st != ST_ACK:
+        raise BridgeError(f"Baud-Rate-Set not ACKed: 0x{st:02x}")
+    a.reset()
+    st, sig = a.silicon_signature()
+    if st != ST_ACK or len(sig) < 22:
+        raise BridgeError(f"Silicon Signature failed (st=0x{st:02x}, len={len(sig)})")
+
+    dev_name = sig[3:13].decode('ascii', errors='replace').strip()
+    cen = int.from_bytes(sig[13:16], 'little')
+    den = int.from_bytes(sig[16:19], 'little')
+
+    cf_bytes = cen + 1
+    df_bytes = max(0, den - DF_BASE + 1) if den >= DF_BASE else 0
+
+    return {
+        'name': dev_name,
+        'dev_code': sig[0:3].hex(),
+        'cf_bytes': cf_bytes,
+        'df_bytes': df_bytes,
+        'cf_pages': cf_bytes // 256,
+        'df_pages': df_bytes // 256,
+        'firmware_ver': f"{sig[19]}.{sig[20]}.{sig[21]}",
+    }
+
+
+def next_dump_number(dump_dir, model):
+    """Find the next sequential dump number for a given model in dump_dir."""
+    pat = re.compile(rf'^{re.escape(model)}_(\d+)_', re.IGNORECASE)
+    max_n = 0
+    if os.path.isdir(dump_dir):
+        for f in os.listdir(dump_dir):
+            m = pat.match(f)
+            if m:
+                max_n = max(max_n, int(m.group(1)))
+    return max_n + 1
 
 
 class Ocd:
@@ -73,6 +122,17 @@ def prepare_for_reading(o):
     o.write(0x0081, [0x00, 0xFF, 0x00])
     o.write(0x0078, [0x80])
     o.write(0x0090, [0x01])
+
+
+def dump_rom(o, path):
+    pages = 0xDF
+    log(f"[ROM] {pages} pages ({pages*256} bytes, phys 0xF0000-0xFDEFF) -> {path}")
+    with open(path, "wb") as f:
+        for i in range(pages):
+            f.write(o.read(i << 8, 0))
+            if i % 8 == 0:
+                print(f"\r  page {i+1}/{pages}", end="", flush=True)
+    print()
 
 
 def dump_dflash(o, pages, path):
@@ -144,9 +204,11 @@ def glitch_scan(b, args, ocd_id, use_fast):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="RL78/F13 glitch + flash dump.")
+    ap = argparse.ArgumentParser(description="RL78 glitch + flash dump.")
     ap.add_argument("-p", "--port", required=True)
-    ap.add_argument("--memory", choices=["dataflash", "codeflash", "both"], required=True)
+    ap.add_argument("--memory", choices=["dataflash", "codeflash", "rom", "both", "all"],
+                    required=True, help="rom = OCD boot ROM (0xF0000-0xFDEFF), "
+                    "both = dataflash+codeflash, all = rom+dataflash+codeflash")
     ap.add_argument("--auth", choices=["glitch", "session", "bypass"], default="glitch")
     ap.add_argument("--id", help="10-byte OCD ID hex (default ten 00)")
     ap.add_argument("--voltage", type=int, default=OCD_VOLTAGE)
@@ -165,10 +227,14 @@ def main():
                     help="width step for --grid mode (ns, default 10)")
     ap.add_argument("--no-fast", action="store_true",
                     help="use 'G' (full OCD with identify) even if fw supports 'Q'")
-    ap.add_argument("--df-pages", type=int, default=16)
-    ap.add_argument("--cf-pages", type=int, default=512)
-    ap.add_argument("--df-out", default="../dumps/dataflash.bin")
-    ap.add_argument("--cf-out", default="../dumps/codeflash.bin")
+    ap.add_argument("--no-identify", action="store_true",
+                    help="skip chip identification (use defaults)")
+    ap.add_argument("--df-pages", type=int, default=None)
+    ap.add_argument("--cf-pages", type=int, default=None)
+    ap.add_argument("--dump-dir", default="../dumps")
+    ap.add_argument("--rom-out", default=None)
+    ap.add_argument("--df-out", default=None)
+    ap.add_argument("--cf-out", default=None)
     args = ap.parse_args()
 
     ocd_id = bytes.fromhex(args.id.replace("0x", "").replace(",", " ")) if args.id else DEFAULT_OCD_ID
@@ -188,6 +254,28 @@ def main():
             log("    using 'Q' (fast OCD, no identify) — ~2x speed")
         elif ver < (1, 11):
             log("    fw < 1.11, using 'G' (full OCD with identify)")
+
+        chip = None
+        if not args.no_identify:
+            try:
+                chip = identify_chip(b)
+                log(f"[*] chip: {chip['name']}  dev={chip['dev_code']}")
+                log(f"    code flash: {chip['cf_bytes']//1024}KB ({chip['cf_pages']} pages)")
+                log(f"    data flash: {chip['df_bytes']//1024}KB ({chip['df_pages']} pages)")
+                log(f"    firmware:   {chip['firmware_ver']}")
+            except (BridgeError, Exception) as e:
+                log(f"[*] identify failed: {e} — using defaults")
+
+        cf_pages = args.cf_pages or (chip['cf_pages'] if chip else 512)
+        df_pages = args.df_pages or (chip['df_pages'] if chip else 16)
+        model = chip['name'] if chip else "UNKNOWN"
+
+        os.makedirs(args.dump_dir, exist_ok=True)
+        n = next_dump_number(args.dump_dir, model)
+        prefix = f"{model}_{n:03d}"
+        cf_out = args.cf_out or os.path.join(args.dump_dir, f"{prefix}_codeflash.bin")
+        df_out = args.df_out or os.path.join(args.dump_dir, f"{prefix}_dataflash.bin")
+        rom_out = args.rom_out or os.path.join(args.dump_dir, f"{prefix}_rom.bin")
 
         need_connect = False
         if args.auth == "glitch":
@@ -212,12 +300,17 @@ def main():
         elif args.auth != "session":
             log("[3] CONNECT returned F0; continuing")
 
-        log("[4] prepare_for_reading")
-        prepare_for_reading(o)
-        if args.memory in ("dataflash", "both"):
-            dump_dflash(o, args.df_pages, args.df_out)
-        if args.memory in ("codeflash", "both"):
-            dump_cflash(o, args.cf_pages, args.cf_out)
+        if args.memory in ("rom", "all"):
+            dump_rom(o, rom_out)
+
+        need_flash = args.memory in ("dataflash", "codeflash", "both", "all")
+        if need_flash:
+            log("[4] prepare_for_reading")
+            prepare_for_reading(o)
+        if args.memory in ("dataflash", "both", "all"):
+            dump_dflash(o, df_pages, df_out)
+        if args.memory in ("codeflash", "both", "all"):
+            dump_cflash(o, cf_pages, cf_out)
         log("Done.")
         return 0
     except BridgeError as e:
