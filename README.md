@@ -142,12 +142,12 @@ PicoRL78/
 1. **Identify** (опционально) — mode 0x3A, Silicon Signature → модель чипа
 2. **OCD entry** — mode 0xC5, Baud-Rate-Set, ping/pong, CONNECT → F1 (locked)
 3. **Auth** — отправка 10 байт ID + чексумма (0xFF для ID=10×00)
-4. **Glitch** — crowbar pulse на REGC **во время передачи байта чексуммы** (delay = ns от начала байта)
+4. **Glitch** — crowbar pulse на REGC **во время security check** (delay = ns от начала чексуммы, сбивает сравнение ID)
 5. **Verify** — CONNECT(0x91) → F0 подтверждает что чип реально разлочен
 6. **Dump** — OCD READ/WRITE/EXEC для чтения flash
 
 Сладкая зона delay:
-- **ID-CODE (F3)**: 60000–80000 ns (середина HIGH-плато чексуммы 0xFF)
+- **ID-CODE (F3)**: 0–100000 ns (security check возле чексуммы)
 - **ProtectError (0x10)**: 150000–400000 ns (security check после Baud-Rate-Set echo)
 
 ### ProtectError bypass

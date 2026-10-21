@@ -22,7 +22,7 @@ Chip → F3 (AUTH-FAIL)          ← неверный пароль
 
 **Управляется:** option byte по адресу `0x000C3` (Security Set в Renesas Flash Programmer).
 
-**Глитч:** crowbar pulse во время передачи байта чексуммы (delay 0–100µs от начала байта). Просадка напряжения портит данные на UART — чип принимает искажённый байт, сравнение проходит с неверными данными.
+**Глитч:** crowbar pulse в момент проверки ID (delay 0–100µs от начала чексуммы). Просадка напряжения сбивает CPU во время сравнения полученного ID со значением в flash — пропуск условного перехода или искажение прочитанных из flash данных.
 
 ### 2. ProtectError Protection (ответ 0x10)
 
@@ -60,9 +60,9 @@ RL78 option bytes расположены в code flash по адресу `0x000C
 ### ID-CODE (проверено на R5F10BAG — RL78/F13)
 ```
 |←── checksum byte TX (~87µs) ──→|
-     |← delay 60-80µs →|█|       ← crowbar pulse (width 80-300ns)
+     |← delay 0-100µs →|█|       ← crowbar pulse (width 80-300ns)
                          ^
-                    портит UART данные
+                  security check (ID compare)
 ```
 Рабочая точка: **d=800ns w=160ns** (LP MOSFET, без модификаций).
 
