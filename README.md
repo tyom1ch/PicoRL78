@@ -22,7 +22,7 @@ arduino-cli compile --fqbn rp2040:rp2040:rpipico2 --output-dir build/glitch firm
 # Прошивка: зажать BOOTSEL, подключить USB, скопировать build/glitch/PicoRL78_bridge.ino.uf2
 ```
 
-Текущая версия: **v1.12** — глитч бьёт ВО ВРЕМЯ передачи байта чексуммы (не после echo).
+Текущая версия: **v1.14** — ProtectError bypass (Baud-Rate-Set glitch) + timing measurement.
 
 ## Использование
 
@@ -51,6 +51,7 @@ python dump.py -p COM9 --memory codeflash
 | `--attempts` | `5000` | Макс. количество попыток |
 | `--mosfet` | `lp` | Crowbar MOSFET: `lp` или `hp` |
 | `--grid` | — | Детерминированный перебор вместо рандома |
+| `--protect` | авто | ProtectError bypass (глитч Baud-Rate-Set вместо ID auth) |
 | `--no-fast` | — | Использовать 'G' (с identify) вместо 'Q' |
 | `--no-identify` | — | Пропустить идентификацию чипа |
 | `--dump-dir` | `../dumps` | Папка для дампов (создаётся автоматически) |
@@ -122,14 +123,15 @@ dumps/
 
 ```
 PicoRL78/
-├── firmware_arduino/PicoRL78_bridge/   # прошивка RP2350 (v1.12)
+├── firmware_arduino/PicoRL78_bridge/   # прошивка RP2350 (v1.14)
 ├── build/glitch/                       # скомпилированный UF2
 ├── host/
 │   ├── dump.py                         # глитч + дамп (основной скрипт)
 │   ├── rl78bridge.py                   # транспорт Pico ↔ host
 │   ├── rl78_proto.py                   # Protocol A + OCD (справочная реализация)
 │   ├── enter_ocd.py                    # чистый OCD вход (диагностика, без глитча)
-│   └── probe_ocd.py                    # проба OCD статуса
+│   ├── probe_ocd.py                    # проба OCD статуса
+│   └── glitch_test.py                  # тест crowbar пульса (без OCD)
 ├── captures/                           # Saleae Logic (.sr/.pvs)
 ├── dumps/                              # дампы flash (авто-создаётся)
 └── tools/analyze_capture.py            # анализ захватов
@@ -144,7 +146,21 @@ PicoRL78/
 5. **Verify** — CONNECT(0x91) → F0 подтверждает что чип реально разлочен
 6. **Dump** — OCD READ/WRITE/EXEC для чтения flash
 
-Сладкая зона delay: **60000–80000 ns** (середина HIGH-плато чексуммы 0xFF).
+Сладкая зона delay:
+- **ID-CODE (F3)**: 60000–80000 ns (середина HIGH-плато чексуммы 0xFF)
+- **ProtectError (0x10)**: 150000–400000 ns (security check после Baud-Rate-Set echo)
+
+### ProtectError bypass
+
+Для чипов с ProtectError (OCD заблокирован полностью, не ID-CODE) — автодетекция:
+```bash
+python dump.py -p COM9 --memory codeflash
+# автоопределение: st1=0x10 → --protect mode, delay 0-600000ns
+```
+Ручной запуск:
+```bash
+python dump.py -p COM9 --memory codeflash --protect --delay 0 600000
+```
 
 #### Документация RL78:
 - [Protocol A](https://www.renesas.com/en/document/apn/rl78-microcontrollers-rl78-protocol-programmer-edition-application-note)

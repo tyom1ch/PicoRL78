@@ -58,7 +58,7 @@ static uint32_t gDelayNs = 0;
 static uint32_t gWidthNs = 0;
 
 #define FW_VER_MAJOR 1
-#define FW_VER_MINOR 12  // 1.12: glitch fires DURING checksum byte, not after echo
+#define FW_VER_MINOR 14  // 1.14: + 'H' ProtectError glitch (baud-rate-set bypass)
 
 // Reset/entry window (ms). f0f enter_rom uses 40/1/10; we use 2 ms for tHD to
 // sit above the 1 ms minimum, well under the 100 ms tSUINIT ceiling.
@@ -300,6 +300,25 @@ static bool readFrame(uint8_t expectedLen, int expectedFirst, uint8_t *first) {
   return expectedFirst < 0 || *first == expectedFirst;
 }
 
+// Like readFrame but accepts ANY LEN from the wire (needed for OCD baud response:
+// ACK has LEN=3, ProtectError has LEN=1).
+static bool readFrameAny(uint8_t *first) {
+  int stx = readWire();
+  if (stx != 0x02) return false;
+  int len = readWire();
+  if (len <= 0 || len > 64) return false;
+  uint8_t sum = (uint8_t)len;
+  for (uint8_t i = 0; i < (uint8_t)len; ++i) {
+    int value = readWire();
+    if (value < 0) return false;
+    if (i == 0) *first = (uint8_t)value;
+    sum += (uint8_t)value;
+  }
+  int check = readWire();
+  if (check < 0 || (uint8_t)(sum + check) != 0 || readWire() != 0x03) return false;
+  return true;
+}
+
 static bool sendModeBaud(uint8_t mode, const uint8_t *baud, uint32_t startGapUs) {
   uint32_t modeStart = time_us_32();
   if (!sendByte(mode)) return false;
@@ -356,7 +375,7 @@ static void doOcd(uint8_t voltage, uint8_t corrupt, const uint8_t id[10], uint8_
   st1 = 0xE2; // echo error
   if (!sendModeBaud(0xC5, baud, 403)) goto done;
   st1 = 0xE0; // missing/malformed baud response
-  if (!readFrame(3, -1, &first)) goto done;
+  if (!readFrameAny(&first)) goto done;
   st1 = first;
   if (st1 != 0x06) goto done;
 
@@ -422,7 +441,7 @@ static void doOcdFast(uint8_t voltage, uint8_t corrupt, const uint8_t id[10], ui
   st1 = 0xE2;
   if (!sendModeBaud(0xC5, baud, 403)) goto done;
   st1 = 0xE0;
-  if (!readFrame(3, -1, &first)) goto done;
+  if (!readFrameAny(&first)) goto done;
   st1 = first;
   if (st1 != 0x06) goto done;
 
@@ -457,6 +476,78 @@ done:
   Serial1.setPollingMode(false);
   uartBegin(REF_BAUD);
   out[0] = st1; out[1] = ping1; out[2] = ping2; out[3] = connect; out[4] = idst;
+}
+
+// ProtectError glitch: glitch AFTER Baud-Rate-Set frame (before chip responds),
+// to bypass ProtectError (0x10) on chips where OCD is disabled via security flag.
+// Delay = ns from end of last baud echo byte.  No Phase 1 (identify).
+// out[0..4] = st1,ping1,ping2,connect,idst; out[5..8] = baudRespNs (LE u32).
+static void doOcdGlitchBaud(uint8_t voltage, uint8_t corrupt, const uint8_t id[10], uint8_t *out) {
+  uint8_t st1=0xEE, ping1=0xEE, ping2=0xEE, connect=0xEE, idst=0xEE;
+  uint32_t baudRespNs = 0;
+
+  uint8_t baud[7] = {0x01, 0x03, 0x9A, 0x00, voltage, 0x00, 0x03};
+  baud[5] = cksum(&baud[1], 4);
+  uint8_t first = 0, auth[11];
+  for (int i = 0; i < 10; ++i) auth[i] = id[i];
+  auth[10] = (uint8_t)~cksum(id, 10);
+  if (corrupt) auth[10]++;
+
+  gpio_put(PIN_TOOL0_TX, 1);
+  gpio_set_dir(PIN_TOOL0_TX, GPIO_OUT);
+  Serial1.end();
+  Serial1.setPollingMode(true);
+  uartBegin(REF_BAUD);
+  uint32_t irqState = save_and_disable_interrupts();
+
+  uint32_t t0Us = 0;
+  referenceEntry();
+  st1 = 0xE2;
+  if (!sendModeBaud(0xC5, baud, 403)) goto done;
+  // Record T0 = end of baud echo (chip starts processing NOW).
+  t0Us = time_us_32();
+  // Glitch during chip's security check.
+  st1 = 0xE0;
+  if (gArmed) { waitNs(gDelayNs); glitchPulseNs(gWidthNs); }
+  if (!readFrameAny(&first)) goto done;
+  // lastRxUs was set by readWire inside readFrameAny (first STX byte arrival).
+  baudRespNs = (lastRxUs - t0Us) * 1000;
+  st1 = first;
+  if (st1 != 0x06) goto done; // still ProtectError? glitch missed
+
+  // ACK — chip accepted baud, continue normal OCD handshake
+  ping1 = (uint8_t)readWire();
+  if (ping1 != 0x00) goto done;
+  afterRxUs(186);
+  if (!sendByte(0x00)) goto done;
+  ping2 = (uint8_t)readWire();
+  if (ping2 != 0x00) goto done;
+  afterRxUs(32);
+  if (!sendByte(0x90) || readWire() != 0x03 || readWire() != 0x04) goto done;
+  afterRxUs(426);
+  if (!sendByte(0x91)) goto done;
+  connect = (uint8_t)readWire();
+  if (connect == 0xF0) { idst = 0xF0; goto done; }
+  if (connect != 0xF1) goto done;
+  afterRxUs(525);
+  uart_write_blocking(uart0, auth, sizeof(auth));
+  { bool echoOk = true;
+    for (int i = 0; i < 10; i++) { if (readWire() != auth[i]) { echoOk = false; break; } }
+    if (!echoOk) goto done;
+  }
+  readWire(500); // checksum echo
+  uart_get_hw(uart0)->rsr = 0;
+  idst = (uint8_t)readWire(5000);
+
+done:
+  restore_interrupts(irqState);
+  gpio_put(PIN_TOOL0_TX, 1);
+  Serial1.end();
+  Serial1.setPollingMode(false);
+  uartBegin(REF_BAUD);
+  out[0] = st1; out[1] = ping1; out[2] = ping2; out[3] = connect; out[4] = idst;
+  out[5] = baudRespNs & 0xFF; out[6] = (baudRespNs >> 8) & 0xFF;
+  out[7] = (baudRespNs >> 16) & 0xFF; out[8] = (baudRespNs >> 24) & 0xFF;
 }
 
 // ---- Command dispatch ------------------------------------------------------
@@ -499,6 +590,35 @@ static void handle(uint8_t cmd) {
                 uint8_t res[5]; doOcdFast(voltage, corrupt, id, res);
                 gArmed = false;
                 wrU8('Q'); for (int i = 0; i < 5; i++) wrU8(res[i]); break; }
+    // ProtectError glitch: glitch during Baud-Rate-Set to bypass ProtectError.
+    // Same wire format as 'G'. Delay = ns from end of baud frame echo.
+    // Response: 'H' st1 ping1 ping2 connect idst baudRespNs(u32LE)
+    case 'H': { uint8_t voltage = rdU8(); uint8_t corrupt = rdU8();
+                uint8_t id[10]; for (int i = 0; i < 10; i++) id[i] = rdU8();
+                gDelayNs = rdU32(); gWidthNs = rdU32();
+                glitchPin = rdU8() ? PIN_GLITCH_HP : PIN_GLITCH_LP;
+                gArmed = (gWidthNs > 0);
+                uint8_t res[9]; doOcdGlitchBaud(voltage, corrupt, id, res);
+                gArmed = false;
+                wrU8('H'); for (int i = 0; i < 9; i++) wrU8(res[i]); break; }
+    // Test glitch: fire crowbar pulse without any OCD / UART activity.
+    // 'T' widthNs(u32) mosfet(0=LP,1=HP) count(u16) intervalUs(u16)
+    //  -> 'T' count(u16)  (echoes how many pulses were fired)
+    case 'T': { uint32_t wNs = rdU32();
+                uint8_t mf = rdU8();
+                uint16_t cnt = rdU16();
+                uint16_t ivUs = rdU16();
+                glitchPin = mf ? PIN_GLITCH_HP : PIN_GLITCH_LP;
+                uint32_t irq = save_and_disable_interrupts();
+                for (uint16_t i = 0; i < cnt; i++) {
+                  glitchPulseNs(wNs);
+                  if (ivUs && i + 1 < cnt) {
+                    uint32_t t = time_us_32();
+                    while ((int32_t)(time_us_32() - t) < (int32_t)ivUs) tight_loop_contents();
+                  }
+                }
+                restore_interrupts(irq);
+                wrU8('T'); wrU16(cnt); break; }
     default: break;   // ignore stray bytes
   }
 }

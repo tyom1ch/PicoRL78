@@ -114,6 +114,32 @@ class RL78Bridge:
         return {"st1": st1, "ping1": ping1, "ping2": ping2,
                 "connect": connect, "idst": idst}
 
+    def protect_glitched_ocd(self, voltage: int, corrupt: bool, ocd_id: bytes,
+                             delay_ns: int, width_ns: int, mosfet: str = "lp") -> dict:
+        """Glitch during Baud-Rate-Set to bypass ProtectError (0x10).
+        delay_ns = ns from end of baud frame echo (chip deciding ACK vs ProtectError).
+        Returns extra field 'baud_resp_ns': time from echo end to chip response."""
+        if len(ocd_id) != 10:
+            raise BridgeError("ocd_id must be 10 bytes")
+        mf = 1 if mosfet.lower() == "hp" else 0
+        self._w(b"H" + bytes([voltage & 0xFF, 1 if corrupt else 0]) + bytes(ocd_id)
+                + struct.pack("<II", delay_ns, width_ns) + bytes([mf]))
+        self._expect(b"H")
+        st1, ping1, ping2, connect, idst = self._r(5)
+        baud_resp_ns = struct.unpack("<I", self._r(4))[0]
+        return {"st1": st1, "ping1": ping1, "ping2": ping2,
+                "connect": connect, "idst": idst, "baud_resp_ns": baud_resp_ns}
+
+    def test_glitch(self, width_ns: int, mosfet: str = "lp",
+                    count: int = 1, interval_us: int = 0) -> int:
+        """Fire bare crowbar pulse(s) without OCD — for scope testing."""
+        mf = 1 if mosfet.lower() == "hp" else 0
+        self._w(b"T" + struct.pack("<I", width_ns) + bytes([mf])
+                + struct.pack("<HH", count, interval_us))
+        self._expect(b"T")
+        fired = struct.unpack("<H", self._r(2))[0]
+        return fired
+
     def flush(self):
         self._w(b"F")
         self._expect(b"FK")

@@ -168,12 +168,21 @@ def verify_unlock(b):
         return False
 
 
-def glitch_scan(b, args, ocd_id, use_fast):
-    glitch_fn = b.fast_glitched_ocd if use_fast else b.glitched_ocd
-    mode = "Q (fast)" if use_fast else "G"
+def glitch_scan(b, args, ocd_id, use_fast, protect=False):
+    if protect:
+        glitch_fn = b.protect_glitched_ocd
+        mode = "H (protect)"
+    elif use_fast:
+        glitch_fn = b.fast_glitched_ocd
+        mode = "Q (fast)"
+    else:
+        glitch_fn = b.glitched_ocd
+        mode = "G"
     total = args.attempts
     log(f"[2] glitch scan: {total} attempts, mosfet={args.mosfet}, "
         f"delay={args.delay[0]}-{args.delay[1]}ns, width={args.width[0]}-{args.width[1]}ns, cmd={mode}")
+    if protect:
+        log("    ProtectError mode: glitch during post-baud security check")
 
     start = time.time()
     if args.grid:
@@ -186,19 +195,36 @@ def glitch_scan(b, args, ocd_id, use_fast):
                        random.randint(args.width[0], args.width[1]))
                       for _ in range(total))
 
+    st1_names = {0x06: "ACK", 0x10: "PROTECT", 0xE0: "no-resp", 0xE2: "echo-err", 0xEE: "not-reached"}
     for n, (delay, width) in enumerate(param_iter, 1):
         r = glitch_fn(args.voltage, False, ocd_id, delay, width, args.mosfet)
         idst = r["idst"]
-        tag = NAMES.get(idst, f"0x{idst:02x}")
-        speed = n / (time.time() - start + 1e-9)
-        log(f"[{n:5d}/{total}] d={delay:5d}ns w={width:4d}ns -> {tag} ({speed:.1f}/s)")
+        st1 = r["st1"]
+        if protect:
+            st1tag = st1_names.get(st1, f"0x{st1:02x}")
+            tag = NAMES.get(idst, f"0x{idst:02x}")
+            resp_ns = r.get("baud_resp_ns", 0)
+            speed = n / (time.time() - start + 1e-9)
+            log(f"[{n:5d}/{total}] d={delay:5d}ns w={width:4d}ns -> st1={st1tag} idst={tag} resp={resp_ns}ns ({speed:.1f}/s)")
+        else:
+            tag = NAMES.get(idst, f"0x{idst:02x}")
+            speed = n / (time.time() - start + 1e-9)
+            log(f"[{n:5d}/{total}] d={delay:5d}ns w={width:4d}ns -> {tag} ({speed:.1f}/s)")
 
-        if idst not in (0xF3, 0xF1, 0xEE, 0xE0, 0xE2, 0xE3):
-            if verify_unlock(b):
-                log(f"    >>> VERIFIED UNLOCK at d={delay}ns w={width}ns (idst=0x{idst:02x}) <<<")
-                return True
-            else:
-                log(f"    (0x{idst:02x} false positive — verify failed)")
+        if protect:
+            if st1 == 0x06 and idst not in (0xEE, 0xE0, 0xE2, 0xE3):
+                if verify_unlock(b):
+                    log(f"    >>> VERIFIED UNLOCK at d={delay}ns w={width}ns (st1=ACK, idst=0x{idst:02x}) <<<")
+                    return True
+                else:
+                    log(f"    (st1=ACK but verify failed — idst=0x{idst:02x})")
+        else:
+            if idst not in (0xF3, 0xF1, 0xEE, 0xE0, 0xE2, 0xE3):
+                if verify_unlock(b):
+                    log(f"    >>> VERIFIED UNLOCK at d={delay}ns w={width}ns (idst=0x{idst:02x}) <<<")
+                    return True
+                else:
+                    log(f"    (0x{idst:02x} false positive — verify failed)")
 
     raise BridgeError("no verified unlock in this window — widen --delay / --width or increase --attempts")
 
@@ -212,10 +238,13 @@ def main():
     ap.add_argument("--auth", choices=["glitch", "session", "bypass"], default="glitch")
     ap.add_argument("--id", help="10-byte OCD ID hex (default ten 00)")
     ap.add_argument("--voltage", type=int, default=OCD_VOLTAGE)
-    ap.add_argument("--delay", nargs=2, type=int, default=[0, 100000],
-                    help="delay range [min max] ns from checksum byte start (default 0 100000)")
-    ap.add_argument("--width", nargs=2, type=int, default=[80, 300],
-                    help="width range [min max] ns (default 80 300)")
+    ap.add_argument("--delay", nargs=2, type=int, default=None,
+                    help="delay range [min max] ns (auto-set per protection type). "
+                    "ID-CODE: 0-100000 (during checksum byte TX). "
+                    "ProtectError: 150000-400000 (post-baud security check).")
+    ap.add_argument("--width", nargs=2, type=int, default=None,
+                    help="width range [min max] ns (auto-set per protection type). "
+                    "ID-CODE: 80-300. ProtectError: 80-300.")
     ap.add_argument("--attempts", type=int, default=5000,
                     help="max attempts (default 5000)")
     ap.add_argument("--mosfet", choices=["lp", "hp"], default="lp")
@@ -225,6 +254,9 @@ def main():
                     help="delay step for --grid mode (ns, default 10)")
     ap.add_argument("--width-step", type=int, default=10,
                     help="width step for --grid mode (ns, default 10)")
+    ap.add_argument("--protect", action="store_true",
+                    help="ProtectError bypass: glitch Baud-Rate-Set instead of ID auth "
+                    "(auto-detected if not set, requires fw >= 1.14)")
     ap.add_argument("--no-fast", action="store_true",
                     help="use 'G' (full OCD with identify) even if fw supports 'Q'")
     ap.add_argument("--no-identify", action="store_true",
@@ -277,9 +309,43 @@ def main():
         df_out = args.df_out or os.path.join(args.dump_dir, f"{prefix}_dataflash.bin")
         rom_out = args.rom_out or os.path.join(args.dump_dir, f"{prefix}_rom.bin")
 
+        protect = args.protect
         need_connect = False
         if args.auth == "glitch":
-            glitch_scan(b, args, ocd_id, use_fast)
+            if not protect:
+                log("[*] probing OCD to detect protection type...")
+                r = b.ocd_bypass(args.voltage, False, ocd_id)
+                if r["st1"] == 0x10:
+                    log("    ProtectError (0x10) detected — switching to --protect mode")
+                    protect = True
+                elif r["st1"] == 0xE0 and r["connect"] == 0xEE:
+                    log("    st1=0xE0 (no baud response) — likely ProtectError, switching to --protect mode")
+                    log("    (if wrong, re-run with --no-fast to force standard glitch)")
+                    protect = True
+                elif r["idst"] in (0xF0, 0xF2):
+                    log(f"    chip already unlocked (idst=0x{r['idst']:02x}) — no glitch needed")
+                    if r["idst"] != 0xF0:
+                        need_connect = True
+                    args.auth = "_already"
+                elif r["idst"] == 0xF3:
+                    log("    ID-CODE protection (F3) — using standard glitch")
+                elif r["idst"] == 0xF1:
+                    log("    locked (F1) — using standard glitch")
+                else:
+                    log(f"    OCD probe: st1=0x{r['st1']:02x} idst=0x{r['idst']:02x}")
+            if protect and ver < (1, 14):
+                raise BridgeError("ProtectError glitch requires fw >= 1.14 (command 'H')")
+            if args.delay is None:
+                if protect:
+                    args.delay = [150000, 400000]
+                    log("    delay auto-set to 150000-400000ns (ProtectError: post-baud security check)")
+                else:
+                    args.delay = [0, 100000]
+                    log("    delay auto-set to 0-100000ns (ID-CODE: during checksum byte)")
+            if args.width is None:
+                args.width = [80, 300]
+            if args.auth == "glitch":
+                glitch_scan(b, args, ocd_id, use_fast, protect=protect)
         elif args.auth == "bypass":
             log("[2] authenticate (atomic OCD bypass)")
             r = b.ocd_bypass(args.voltage, False, ocd_id)
@@ -297,6 +363,8 @@ def main():
             o.connect()
         elif args.auth == "glitch":
             log("[3] CONNECT verified during scan; chip in OCD mode")
+        elif args.auth == "_already":
+            log("[3] chip already unlocked from probe; continuing")
         elif args.auth != "session":
             log("[3] CONNECT returned F0; continuing")
 
