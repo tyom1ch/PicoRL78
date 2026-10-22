@@ -337,8 +337,8 @@ def main():
                 raise BridgeError("ProtectError glitch requires fw >= 1.14 (command 'H')")
             if args.delay is None:
                 if protect:
-                    args.delay = [150000, 400000]
-                    log("    delay auto-set to 150000-400000ns (ProtectError: post-baud security check)")
+                    args.delay = [105000, 255000]
+                    log("    delay auto-set to 105000-255000ns (ProtectError: post-baud security check)")
                 else:
                     args.delay = [0, 100000]
                     log("    delay auto-set to 0-100000ns (ID-CODE: during checksum byte)")
