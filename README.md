@@ -60,6 +60,8 @@ python dump.py -p COM9 --memory codeflash
 | `--cf-pages` | авто | Количество страниц code flash (авто из Silicon Sig) |
 | `--df-pages` | авто | Количество страниц data flash (авто из Silicon Sig) |
 | `--voltage` | `50` | Напряжение (V×10): 50=5.0V, 33=3.3V |
+| `--unlock` | — | После дампа: перманентно снять OCD-защиту (erase block 0 + reprogram с патченными option bytes) |
+| `--rescue DUMP` | — | Стереть весь code flash и перепрошить из файла дампа (Protocol A, без глитча) |
 
 ### Примеры
 
@@ -105,6 +107,18 @@ python dump.py -p COM9 --memory codeflash --dump-dir ./output
 **Grid-скан (детерминированный перебор):**
 ```bash
 python dump.py -p COM9 --memory codeflash --grid --delay 60000 80000 --width 200 350 --delay-step 100 --width-step 10
+```
+
+**Дамп + перманентная разблокировка (снятие ProtectError + ID-CODE):**
+```bash
+python dump.py -p COM9 --memory codeflash --unlock
+# глитч → дамп → erase block 0 → reprogram с OCD enabled, OCD ID = 00*10
+```
+
+**Восстановление заблокированного чипа из дампа (без глитча):**
+```bash
+python dump.py -p COM9 --rescue dumps/R5F10BAG_001_codeflash.bin
+# Protocol A: erase all → reprogram all → option bytes патчатся автоматически
 ```
 
 ### Авто-нумерация дампов

@@ -229,11 +229,163 @@ def glitch_scan(b, args, ocd_id, use_fast, protect=False):
     raise BridgeError("no verified unlock in this window — widen --delay / --width or increase --attempts")
 
 
+BLOCK0_SIZE = 1024   # 1 KB — smallest erasable unit on RL78 F12/F13/G13/G14
+
+
+def _do_rescue(b, dump_path, voltage):
+    """Erase entire code flash and reprogram from dump via Protocol A (no OCD/glitch)."""
+    from rl78_proto import (
+        Link, ProtoA, MODE_A_1WIRE,
+        ST_ACK, ST_NAMES,
+    )
+
+    if not os.path.exists(dump_path):
+        log(f"[rescue] dump file not found: {dump_path}")
+        return 2
+
+    with open(dump_path, 'rb') as f:
+        firmware = bytearray(f.read())
+    fw_size = len(firmware)
+    log(f"[rescue] dump: {dump_path} ({fw_size} bytes, {fw_size // 1024}KB)")
+
+    b.ser.timeout = 10.0
+
+    log("[rescue] entering programming mode (0x3A)...")
+    b.set_baud(115200)
+    b.enter(MODE_A_1WIRE)
+    link = Link(b, trace=False)
+    a = ProtoA(link)
+
+    st = a.set_baudrate(115200, voltage=voltage)
+    if st != ST_ACK:
+        log(f"[rescue] Baud-Rate-Set failed: 0x{st:02x} ({ST_NAMES.get(st, '?')})")
+        return 2
+    a.reset()
+
+    st, sig = a.silicon_signature()
+    if st == ST_ACK and len(sig) >= 22:
+        dev_name = sig[3:13].decode('ascii', errors='replace').strip()
+        cen = int.from_bytes(sig[13:16], 'little')
+        cf_bytes = cen + 1
+        log(f"[rescue] chip: {dev_name}  code flash: {cf_bytes // 1024}KB")
+        if fw_size > cf_bytes:
+            log(f"[rescue] WARNING: dump ({fw_size}) > chip flash ({cf_bytes}), truncating")
+            firmware = firmware[:cf_bytes]
+            fw_size = cf_bytes
+    else:
+        log(f"[rescue] Silicon Signature failed (st=0x{st:02x}), continuing with dump size")
+
+    firmware[0xC2] = 0xFF
+    firmware[0xC3] = 0xFF
+    firmware[0xC4:0xCE] = b'\x00' * 10
+    log(f"[rescue] option bytes patched: C2=FF C3=FF OCD-ID=00*10")
+
+    n_blocks = (fw_size + BLOCK0_SIZE - 1) // BLOCK0_SIZE
+    log(f"[rescue] erasing {n_blocks} blocks...")
+    for i in range(n_blocks):
+        sa = i * BLOCK0_SIZE
+        ea = sa + BLOCK0_SIZE - 1
+        st = a.block_erase(sa, ea)
+        if st != ST_ACK:
+            log(f"[rescue] block erase @0x{sa:06x} failed: 0x{st:02x} ({ST_NAMES.get(st, '?')})")
+            return 2
+        if (i + 1) % 16 == 0 or i + 1 == n_blocks:
+            print(f"\r  erased {i + 1}/{n_blocks}", end="", flush=True)
+    print()
+
+    log(f"[rescue] programming {fw_size} bytes...")
+    for i in range(n_blocks):
+        sa = i * BLOCK0_SIZE
+        ea = sa + BLOCK0_SIZE - 1
+        chunk = bytes(firmware[sa:sa + BLOCK0_SIZE])
+        if len(chunk) < BLOCK0_SIZE:
+            chunk = chunk + b'\xFF' * (BLOCK0_SIZE - len(chunk))
+        st = a.programming(sa, ea, chunk)
+        if st != ST_ACK:
+            log(f"[rescue] programming @0x{sa:06x} failed: 0x{st:02x} ({ST_NAMES.get(st, '?')})")
+            return 2
+        if (i + 1) % 16 == 0 or i + 1 == n_blocks:
+            print(f"\r  programmed {i + 1}/{n_blocks}", end="", flush=True)
+    print()
+
+    log("[rescue] done — chip reprogrammed, OCD unlocked (ID = 00*10)")
+    return 0
+
+
+def _do_unlock(b, args, cf_out):
+    """Permanently remove OCD protection via Protocol A erase after dump."""
+    from rl78_proto import (
+        Link, ProtoA, MODE_A_1WIRE,
+        ST_ACK, ST_NAMES,
+    )
+
+    log("[unlock] permanently removing OCD protection...")
+    try:
+        b.auto_reset(80, 25)
+    except BridgeError:
+        b.reset_line(assert_low=True)
+        time.sleep(0.1)
+        b.reset_line(assert_low=False)
+        time.sleep(0.05)
+
+    time.sleep(0.15)
+    b.ser.timeout = 10.0
+    b.set_baud(115200)
+    b.enter(MODE_A_1WIRE)
+    link = Link(b, trace=True)
+    a = ProtoA(link)
+
+    st = a.set_baudrate(115200, voltage=args.voltage)
+    if st != ST_ACK:
+        log(f"[unlock] Baud-Rate-Set failed: 0x{st:02x} ({ST_NAMES.get(st, '?')})")
+        return
+    a.reset()
+
+    st, sec = a.security_get()
+    if st == ST_ACK and sec:
+        log(f"[unlock] security flags: {sec.hex(' ')}")
+    else:
+        log(f"[unlock] Security-Get: 0x{st:02x} ({ST_NAMES.get(st, '?')})")
+
+    log(f"[unlock] erasing block 0 (0x000000-0x{BLOCK0_SIZE - 1:06x})...")
+    st = a.block_erase(0x000000, BLOCK0_SIZE - 1)
+    if st != ST_ACK:
+        log(f"[unlock] Block Erase failed: 0x{st:02x} ({ST_NAMES.get(st, '?')})")
+        log("[unlock] use --rescue <dump> as fallback (erases + reprograms ALL flash)")
+        return
+
+    if os.path.exists(cf_out):
+        log(f"[unlock] restoring block 0 from {cf_out} with patched option bytes...")
+        with open(cf_out, 'rb') as f:
+            block0 = bytearray(f.read(BLOCK0_SIZE))
+        if len(block0) < BLOCK0_SIZE:
+            block0.extend(b'\xFF' * (BLOCK0_SIZE - len(block0)))
+    else:
+        log("[unlock] no codeflash dump — using blank block 0")
+        block0 = bytearray(b'\xFF' * BLOCK0_SIZE)
+
+    block0[0xC2] = 0xFF
+    block0[0xC3] = 0xFF
+    block0[0xC4:0xCE] = b'\x00' * 10
+    log(f"[unlock] option bytes: C0={block0[0xC0]:02x} C1={block0[0xC1]:02x} "
+        f"C2={block0[0xC2]:02x} C3={block0[0xC3]:02x} "
+        f"OCD-ID={block0[0xC4:0xCE].hex(' ')}")
+
+    st = a.programming(0x000000, BLOCK0_SIZE - 1, bytes(block0))
+    if st == ST_ACK:
+        log("[unlock] block 0 programmed OK")
+    else:
+        log(f"[unlock] programming failed: 0x{st:02x} ({ST_NAMES.get(st, '?')})")
+        return
+
+    log("[unlock] OCD unlocked (OCD ID = 00*10, ProtectError removed)")
+
+
 def main():
     ap = argparse.ArgumentParser(description="RL78 glitch + flash dump.")
     ap.add_argument("-p", "--port", required=True)
     ap.add_argument("--memory", choices=["dataflash", "codeflash", "rom", "both", "all"],
-                    required=True, help="rom = OCD boot ROM (0xF0000-0xFDEFF), "
+                    help="rom = OCD boot ROM (0xF0000-0xFDEFF), "
                     "both = dataflash+codeflash, all = rom+dataflash+codeflash")
     ap.add_argument("--auth", choices=["glitch", "session", "bypass"], default="glitch")
     ap.add_argument("--id", help="10-byte OCD ID hex (default ten 00)")
@@ -267,7 +419,16 @@ def main():
     ap.add_argument("--rom-out", default=None)
     ap.add_argument("--df-out", default=None)
     ap.add_argument("--cf-out", default=None)
+    ap.add_argument("--unlock", action="store_true",
+                    help="after dump, permanently remove OCD protection: erase block 0, "
+                    "reprogram from dump with patched option bytes + OCD ID = 00*10")
+    ap.add_argument("--rescue", metavar="DUMP",
+                    help="erase entire code flash and reprogram from a dump file "
+                    "(Protocol A only, no glitch needed). Patches option bytes + OCD ID.")
     args = ap.parse_args()
+
+    if not args.rescue and not args.memory:
+        ap.error("--memory is required (unless using --rescue)")
 
     ocd_id = bytes.fromhex(args.id.replace("0x", "").replace(",", " ")) if args.id else DEFAULT_OCD_ID
     if len(ocd_id) != 10:
@@ -275,6 +436,11 @@ def main():
 
     b = RL78Bridge(args.port)
     try:
+        if args.rescue:
+            ver = b.version()
+            log(f"[1] bridge v{ver[0]}.{ver[1]}")
+            return _do_rescue(b, args.rescue, args.voltage)
+
         ver = b.version()
         log(f"[1] bridge v{ver[0]}.{ver[1]}")
         use_fast = ver >= (1, 11) and not args.no_fast
@@ -379,6 +545,10 @@ def main():
             dump_dflash(o, df_pages, df_out)
         if args.memory in ("codeflash", "both", "all"):
             dump_cflash(o, cf_pages, cf_out)
+
+        if args.unlock:
+            _do_unlock(b, args, cf_out)
+
         log("Done.")
         return 0
     except BridgeError as e:

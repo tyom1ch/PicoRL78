@@ -27,10 +27,16 @@ ETX = 0x03   # last-frame footer
 ETB = 0x17   # non-last data-frame footer
 
 # ---- Protocol A commands ---------------------------------------------------
-COM_RESET        = 0x00
-COM_BAUDRATE_SET = 0x9A
-COM_SILICON_SIG  = 0xC0
-COM_SEC_GET      = 0xA1
+COM_RESET             = 0x00
+COM_VERIFY            = 0x13
+COM_BLOCK_ERASE       = 0x22
+COM_BLOCK_BLANK_CHECK = 0x32
+COM_PROGRAMMING       = 0x40
+COM_BAUDRATE_SET      = 0x9A
+COM_SEC_SET           = 0xA0
+COM_SEC_GET           = 0xA1
+COM_SEC_RELEASE       = 0xA2
+COM_SILICON_SIG       = 0xC0
 
 # ---- Protocol A status codes (R01AN0815 Table 1-4) -------------------------
 ST_COM_NUM_ERR = 0x04
@@ -41,11 +47,13 @@ ST_VERIFY_ERR  = 0x0F
 ST_PROTECT_ERR = 0x10
 ST_NACK        = 0x15
 ST_ERASE_ERR   = 0x1A
+ST_BLANK_ERR   = 0x1B
+ST_WRITE_ERR   = 0x1C
 
 ST_NAMES = {
     0x04: "COMMAND-NUMBER-ERROR", 0x05: "PARAMETER-ERROR", 0x06: "ACK",
     0x07: "CHECKSUM-ERROR", 0x0F: "VERIFY-ERROR", 0x10: "PROTECT-ERROR",
-    0x15: "NACK", 0x1A: "ERASE-ERROR",
+    0x15: "NACK", 0x1A: "ERASE-ERROR", 0x1B: "BLANK-ERROR", 0x1C: "WRITE-ERROR",
 }
 
 # ---- Baud-rate codes used by the Baud-Rate-Set command ---------------------
@@ -135,6 +143,17 @@ def build_command(com: int, info: bytes = b"") -> bytes:
     return bytes([SOH, ln]) + payload + bytes([sm, ETX])
 
 
+def build_data_frame(data: bytes, last: bool = True) -> bytes:
+    ln = len(data) & 0xFF                    # 00h => 256
+    sm = _csum(bytes([ln]) + data)
+    footer = ETX if last else ETB
+    return bytes([STX, ln]) + data + bytes([sm, footer])
+
+
+def _addr_info(sa: int, ea: int) -> bytes:
+    return sa.to_bytes(3, 'little') + ea.to_bytes(3, 'little')
+
+
 def parse_frame(buf: bytes):
     """Parse one data/status frame (STX LEN data SUM ETX|ETB). Returns (data,last)."""
     if len(buf) < 4:
@@ -198,6 +217,75 @@ class ProtoA:
         except ProtoError:
             pass
         return st, sig
+
+    def security_get(self, timeout_ms=500):
+        """Returns (status, 8-byte security flags)."""
+        self.link.send(build_command(COM_SEC_GET), label="Security-Get")
+        st = self._read_frame(timeout_ms=timeout_ms, label="status")[0]
+        sec = b""
+        if st == ST_ACK:
+            try:
+                sec = self._read_frame(timeout_ms=timeout_ms, label="security")
+            except ProtoError:
+                pass
+        return st, sec
+
+    def block_erase(self, sa: int, ea: int, timeout_ms=10000) -> int:
+        return self.command_status(COM_BLOCK_ERASE, _addr_info(sa, ea),
+                                   timeout_ms=timeout_ms, label="Block-Erase")
+
+    def block_blank_check(self, sa: int, ea: int, timeout_ms=2000) -> int:
+        return self.command_status(COM_BLOCK_BLANK_CHECK, _addr_info(sa, ea),
+                                   timeout_ms=timeout_ms, label="Block-Blank-Check")
+
+    def programming(self, sa: int, ea: int, data: bytes, timeout_ms=5000) -> int:
+        """Write `data` to flash range [sa..ea]. Data is sent in 256-byte frames."""
+        total = ea - sa + 1
+        if len(data) < total:
+            data = data + b'\xFF' * (total - len(data))
+        self.link.send(build_command(COM_PROGRAMMING, _addr_info(sa, ea)),
+                       label="Programming")
+        st = self._read_frame(timeout_ms=timeout_ms, label="status")[0]
+        if st != ST_ACK:
+            return st
+        for off in range(0, total, 256):
+            chunk = data[off:off + 256]
+            if len(chunk) < 256:
+                chunk = chunk + b'\xFF' * (256 - len(chunk))
+            last = (off + 256 >= total)
+            frame = build_data_frame(chunk, last=last)
+            self.link.send(frame, label=f"data @0x{sa + off:06x}")
+            st = self._read_frame(timeout_ms=timeout_ms, label="data-ack")[0]
+            if st != ST_ACK:
+                return st
+        return ST_ACK
+
+    def verify(self, sa: int, ea: int, data: bytes, timeout_ms=5000) -> int:
+        """Compare `data` against flash range [sa..ea]."""
+        total = ea - sa + 1
+        if len(data) < total:
+            data = data + b'\xFF' * (total - len(data))
+        self.link.send(build_command(COM_VERIFY, _addr_info(sa, ea)),
+                       label="Verify")
+        st = self._read_frame(timeout_ms=timeout_ms, label="status")[0]
+        if st != ST_ACK:
+            return st
+        for off in range(0, total, 256):
+            chunk = data[off:off + 256]
+            if len(chunk) < 256:
+                chunk = chunk + b'\xFF' * (256 - len(chunk))
+            last = (off + 256 >= total)
+            frame = build_data_frame(chunk, last=last)
+            self.link.send(frame, label=f"verify @0x{sa + off:06x}")
+            st = self._read_frame(timeout_ms=timeout_ms, label="verify-ack")[0]
+            if st != ST_ACK:
+                return st
+        return ST_ACK
+
+    def security_release(self, timeout_ms=30000) -> int:
+        """Full chip erase + security flag reset (nuclear option)."""
+        return self.command_status(COM_SEC_RELEASE, timeout_ms=timeout_ms,
+                                   label="Security-Release")
 
 
 # ============================================================================
