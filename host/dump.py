@@ -24,6 +24,7 @@ import sys
 import time
 
 from rl78bridge import RL78Bridge, BridgeError
+from rl78_proto import ProtoError
 
 DEFAULT_OCD_ID = bytes(10)
 OCD_VOLTAGE = 50
@@ -551,7 +552,7 @@ def main():
 
         log("Done.")
         return 0
-    except BridgeError as e:
+    except (BridgeError, ProtoError) as e:
         log(f"ERROR: {e}")
         return 2
     finally:

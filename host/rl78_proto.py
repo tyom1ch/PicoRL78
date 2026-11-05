@@ -231,7 +231,9 @@ class ProtoA:
         return st, sec
 
     def block_erase(self, sa: int, ea: int, timeout_ms=10000) -> int:
-        return self.command_status(COM_BLOCK_ERASE, _addr_info(sa, ea),
+        # R01AN0815 section 3.3: LEN=04, COM + SAL/SAM/SAH only.
+        # Keep ea for compatibility with existing single-block callers.
+        return self.command_status(COM_BLOCK_ERASE, sa.to_bytes(3, 'little'),
                                    timeout_ms=timeout_ms, label="Block-Erase")
 
     def block_blank_check(self, sa: int, ea: int, timeout_ms=2000) -> int:
@@ -255,10 +257,15 @@ class ProtoA:
             last = (off + 256 >= total)
             frame = build_data_frame(chunk, last=last)
             self.link.send(frame, label=f"data @0x{sa + off:06x}")
-            st = self._read_frame(timeout_ms=timeout_ms, label="data-ack")[0]
-            if st != ST_ACK:
-                return st
-        return ST_ACK
+            status = self._read_frame(timeout_ms=timeout_ms, label="data-ack")
+            if len(status) != 2:
+                raise ProtoError(f"Programming: expected two status bytes, got {status.hex(' ')}")
+            for st in status:
+                if st != ST_ACK:
+                    return st
+        # Section 3.4.4: a separate internal-verify result follows the last
+        # data ACK. Consume it before sending the next command.
+        return self._read_frame(timeout_ms=timeout_ms, label="internal-verify")[0]
 
     def verify(self, sa: int, ea: int, data: bytes, timeout_ms=5000) -> int:
         """Compare `data` against flash range [sa..ea]."""
