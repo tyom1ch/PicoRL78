@@ -71,3 +71,11 @@
 ### Дамп
 
 128KB code flash, 4KB data flash, 57KB ROM
+
+## R5F10AGF — RL78/G13
+
+**Устройство:** ProtectError чип
+**Защита:** ProtectError (0x10) — OCD полностью заблокирован
+**OCD ID:** нет (чип даже не доходит до проверки пароля)
+
+<img width="1067" height="312" alt="image" src="https://github.com/user-attachments/assets/2b955af7-ff94-469d-b3c3-f1afa8b70fb1" />
