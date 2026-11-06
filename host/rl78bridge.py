@@ -55,6 +55,14 @@ class RL78Bridge:
         maj, minr = self._r(2)
         return (maj, minr)
 
+    def set_ocd_profile(self, profile: str):
+        """Firmware >= 1.15: select reference (0) or D1A (1) OCD timings."""
+        profiles = {"reference": 0, "d1a": 1}
+        if profile not in profiles:
+            raise ValueError(f"Unknown OCD profile: {profile}")
+        self._w(b"S" + bytes([profiles[profile]]))
+        self._expect(b"SK")
+
     def set_baud(self, baud: int):
         self._w(b"B" + struct.pack("<I", baud))
         self._expect(b"BK")

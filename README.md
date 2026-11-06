@@ -62,6 +62,7 @@ python dump.py -p COM9 --memory codeflash
 | `--voltage` | `50` | Напряжение (V×10): 50=5.0V, 33=3.3V |
 | `--unlock` | — | После дампа: патч option bytes/OCD ID, пересчёт CRC и запись всего CodeFlash; блок 0 последним |
 | `--rescue DUMP` | — | Восстановить файл побайтно, включая исходные option bytes, OCD ID и CRC (Protocol A, без глитча) |
+| `--ocd-profile` | `auto` | OCD-профиль: `auto` (D1A для R5F10DMF), `d1a` или `reference`; D1A требует bridge v1.15+ |
 
 ### Примеры
 
@@ -190,6 +191,7 @@ python dump.py -p COM9 --memory codeflash --protect --delay 0 600000
 - RL78/F12 R5F109GC - Honda GATEWAY 38890-T22-A11 (защита ProtectError) (CODE одинаковая с 38890-T20-A22, 38890-T20-A52, ...)
 - RL78/F13 R5F10AGG - VW 5Q1953569C (защита ID-CODE)
 - RL78/F13 R5F10AGF — подтверждён обход ProtectError и чтение 96 KiB CodeFlash, 4 KiB DataFlash и 57088 байт ROM (подробности в [chip-notes](docs/chip-notes.md#r5f10agf--rl78f13))
+- RL78/D1A R5F10DMF — чтение подтверждено с bridge v1.15 и профилем `d1a`; профиль `reference` не проходит первый ping на этом экземпляре ([протокол и параметры](docs/d1a-support.md))
 - RL78/F14 R5F10PPJ - Honda Relay Module 38830-TVA-A01 (защита ProtectError)
 
 ![HELL](https://github.com/VV1LD/SYSGLITCH/blob/master/hell.jpg)

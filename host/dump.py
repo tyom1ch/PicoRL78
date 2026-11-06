@@ -370,6 +370,8 @@ def main():
     ap.add_argument("--memory", choices=["dataflash", "codeflash", "rom", "both", "all"],
                     help="rom = OCD boot ROM (0xF0000-0xFDEFF), "
                     "both = dataflash+codeflash, all = rom+dataflash+codeflash")
+    ap.add_argument("--ocd-profile", choices=["auto", "reference", "d1a"], default="auto",
+                    help="OCD timing profile; auto selects D1A for R5F10DMF")
     ap.add_argument("--auth", choices=["glitch", "session", "bypass"], default="glitch")
     ap.add_argument("--id", help="10-byte OCD ID hex (default ten 00)")
     ap.add_argument("--voltage", type=int, default=OCD_VOLTAGE)
@@ -447,6 +449,17 @@ def main():
                 log(f"    firmware:   {chip['firmware_ver']}")
             except (BridgeError, Exception) as e:
                 log(f"[*] identify failed: {e} — using defaults")
+
+        profile = args.ocd_profile
+        if profile == "auto":
+            profile = "d1a" if chip and chip["name"] == "R5F10DMF" else "reference"
+        if profile == "d1a" and ver < (1, 15):
+            raise BridgeError("D1A OCD requires bridge firmware >= 1.15")
+        if profile == "d1a" and args.unlock:
+            raise BridgeError("D1A reading supported; permanent --unlock patch/CRC is not implemented for D1A")
+        if ver >= (1, 15):
+            b.set_ocd_profile(profile)
+        log(f"[*] OCD profile: {profile}")
 
         cf_pages = args.cf_pages or (chip['cf_pages'] if chip else 512)
         df_pages = args.df_pages or (chip['df_pages'] if chip else 16)
