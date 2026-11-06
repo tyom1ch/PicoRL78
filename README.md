@@ -10,8 +10,6 @@ Voltage fault injection (crowbar glitch) на RL78 OCD через PicoGlitcher v
 ## Железо
 
 - **PicoGlitcher v3.0** (RP2350) — GP16/GP17 → TOOL0, GP2 → /RESET, GP22 → VTARGET
-- **Crowbar**: GP3 GLITCH_EN, GP13 LP MOSFET, GP12 HP MOSFET → REGC
-- Saleae Logic (опционально, для отладки тайминга)
 
 ## Прошивка
 
