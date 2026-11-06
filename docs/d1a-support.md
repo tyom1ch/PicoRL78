@@ -1,37 +1,24 @@
-# D1A OCD profile (bridge v1.15)
+# Профиль OCD D1A (bridge v1.15)
 
-R5F10DMF is selected automatically from Silicon Signature. Override with
-`--ocd-profile d1a` when identification is skipped. Firmware command
-`S 01` selects D1A; `S 00` restores reference timing. Reply: `SK`.
-The profile applies to O/G/Q/H. Each host run explicitly selects its profile
-on firmware >= 1.15, avoiding a stale D1A profile on subsequent F13 sessions.
+Модель R5F10DMF определяется автоматически на основе «цифровой подписи» (Silicon Signature). Если автоматическое определение пропущено, профиль можно задать принудительно с помощью параметра `--ocd-profile d1a`. Команда прошивки `S 01` активирует профиль D1A, а `S 00` возвращает стандартные временные параметры. Ответ: `SK`.
+Профиль применим к сериям O/G/Q/H. Начиная с версии прошивки 1.15, при каждом запуске на хосте профиль выбирается явно; это предотвращает использование устаревшего профиля D1A в последующих сессиях для устройств F13.
 
-Timing is based on the successful DMF.sr capture: RESET low 100125 us,
-TOOL low after reset release 10013 us, TOOL high before mode 2654 us,
-mode-to-baud start gap 359 us. Post-RX waits are 78/17/266/344 us for
-first ping / second ping / response to 90 / F1. These waits account for
-the UART stop-bit sampling time (~82 us from start).
-Command 90 must return 03 03 for D1A; the reference profile retains 03 04.
+Временные интервалы основаны на успешном захвате данных DMF.sr: сигнал RESET удерживается в низком уровне 100 125 мкс; сигнал TOOL переходит в низкий уровень через 10 013 мкс после снятия сигнала RESET; перед переходом в режим работы сигнал TOOL переводится в высокий уровень на 2654 мкс; интервал между переходом в режим работы и началом передачи данных (baud rate) составляет 359 мкс. Задержки после приема данных (RX) составляют 78/17/266/344 мкс — для первого запроса (ping), второго запроса, а также для ответов на команды 90 и F1 соответственно. Эти задержки учитывают время сэмплирования стоп-бита UART (около 82 мкс от начала передачи).
+При использовании профиля D1A команда 90 должна возвращать значение `03 03` (в стандартном профиле предусмотрено `03 04`).
 
-Build the updated bridge for PicoGlitcher v3 / Pico 2:
+Сборка обновленной прошивки моста (bridge) для PicoGlitcher v3 / Pico 2:
 
 ```powershell
 arduino-cli compile --fqbn rp2040:rp2040:rpipico2 --output-dir build/d1a firmware_arduino/PicoRL78_bridge
 ```
 
-After installing firmware v1.15, read with the known zero ID:
+После установки прошивки версии 1.15 выполните чтение, используя нулевой идентификатор (ID):
 
 ```powershell
 python dump.py -p COM9 --memory all --auth bypass --id "00 00 00 00 00 00 00 00 00 00"
 ```
 
-Permanent --unlock for this profile is rejected: the F13 option-byte/CRC
-patch must not be applied to D1A. --rescue retains its exact-image behavior.
-Hardware validation: R5F10DMF was read successfully with firmware v1.15 and
-`--ocd-profile d1a`. The reference profile did not complete the first ping on
-this chip. The D1A profile is required for this case; it is not merely an
-optional timing adjustment. A poor contact was initially suspected, but the
-working D1A profile confirmed that the profile differences matter.
+Использование опции `--unlock` для данного профиля невозможно: для устройств серии F13 нельзя применять патч для байтов конфигурации (option bytes) и контрольной суммы (CRC). Режим `--rescue` сохраняет свою функциональность, обеспечивающую создание точного образа (exact-image).
+Проверка на аппаратном уровне: микроконтроллер R5F10DMF был успешно считан с использованием прошивки версии 1.15 и профиля `--ocd-profile d1a`. При использовании эталонного профиля (reference profile) не удалось даже выполнить первый «пинг» (ping) этого чипа. В данном случае профиль D1A является обязательным, а не просто опциональной корректировкой временных параметров. Изначально возникло подозрение на плохой контакт, однако успешная работа с профилем D1A подтвердила, что различия между профилями имеют принципиальное значение.
 
-To compare profiles explicitly, add `--ocd-profile reference` or
-`--ocd-profile d1a`; default `auto` selects D1A for R5F10DMF.
+Чтобы явно выбрать профиль, можно использовать параметры `--ocd-profile reference` или `--ocd-profile d1a`; по умолчанию (в режиме `auto`) для R5F10DMF выбирается профиль D1A.
