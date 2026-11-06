@@ -60,8 +60,8 @@ python dump.py -p COM9 --memory codeflash
 | `--cf-pages` | авто | Количество страниц code flash (авто из Silicon Sig) |
 | `--df-pages` | авто | Количество страниц data flash (авто из Silicon Sig) |
 | `--voltage` | `50` | Напряжение (V×10): 50=5.0V, 33=3.3V |
-| `--unlock` | — | После дампа: перманентно снять OCD-защиту (erase block 0 + reprogram с патченными option bytes) |
-| `--rescue DUMP` | — | Стереть весь code flash и перепрошить из файла дампа (Protocol A, без глитча) |
+| `--unlock` | — | После дампа: патч option bytes/OCD ID, пересчёт CRC и запись всего CodeFlash; блок 0 последним |
+| `--rescue DUMP` | — | Восстановить файл побайтно, включая исходные option bytes, OCD ID и CRC (Protocol A, без глитча) |
 
 ### Примеры
 
@@ -112,16 +112,19 @@ python dump.py -p COM9 --memory codeflash --grid --delay 60000 80000 --width 200
 **Дамп + перманентная разблокировка (снятие ProtectError + ID-CODE):**
 ```bash
 python dump.py -p COM9 --memory codeflash --unlock
-# глитч → дамп → erase block 0 → reprogram с OCD enabled, OCD ID = 00*10
+# глитч → оригинальный дамп → патч копии в памяти + CRC → запись CodeFlash, блок 0 последним
 ```
 
 **Восстановление заблокированного чипа из дампа (без глитча):**
 ```bash
-python dump.py -p COM9 --rescue dumps/R5F10BAG_001_codeflash.bin
-# Protocol A: erase all → reprogram all → option bytes патчатся автоматически
+python dump.py -p COM9 --rescue ../dumps/R5F10BAG_001_codeflash.bin
+# Protocol A: восстановление всех байтов файла без патчей; блок 0 последним
 ```
 
 ### Авто-нумерация дампов
+
+`--unlock` — флаг без аргумента; оригинальный файл дампа не изменяется.
+`--rescue DUMP` восстанавливает также исходные настройки защиты. Режимы взаимоисключающие.
 
 Файлы именуются `MODEL_NNN_тип.bin` (номер инкрементится автоматически):
 ```
@@ -186,6 +189,7 @@ python dump.py -p COM9 --memory codeflash --protect --delay 0 600000
 - RL78/F13 R5F10BAG - KTM ICKT_64100110T39 (защита ID-CODE)
 - RL78/F12 R5F109GC - Honda GATEWAY 38890-T22-A11 (защита ProtectError) (CODE одинаковая с 38890-T20-A22, 38890-T20-A52, ...)
 - RL78/F13 R5F10AGG - VW 5Q1953569C (защита ID-CODE)
+- RL78/F13 R5F10AGF — подтверждён обход ProtectError и чтение 96 KiB CodeFlash, 4 KiB DataFlash и 57088 байт ROM (подробности в [chip-notes](docs/chip-notes.md#r5f10agf--rl78f13))
 - RL78/F14 R5F10PPJ - Honda Relay Module 38830-TVA-A01 (защита ProtectError)
 
 ![HELL](https://github.com/VV1LD/SYSGLITCH/blob/master/hell.jpg)

@@ -183,7 +183,7 @@ class ProtoA:
         trailing bytes the monitor emits next (e.g. an OCD SYNC) stay buffered."""
         hdr = self.link.read(2, timeout_ms=timeout_ms, log=False)
         if len(hdr) < 2:
-            raise ProtoError(f"no frame header (got {hdr.hex(' ')!r})")
+            raise ProtoError(f"{label}: no frame header (got {hdr.hex(' ')!r})")
         if hdr[0] != STX:
             raise ProtoError(f"expected STX(02), got {hdr.hex(' ')!r}")
         n = 256 if hdr[1] == 0 else hdr[1]
@@ -234,7 +234,7 @@ class ProtoA:
         # R01AN0815 section 3.3: LEN=04, COM + SAL/SAM/SAH only.
         # Keep ea for compatibility with existing single-block callers.
         return self.command_status(COM_BLOCK_ERASE, sa.to_bytes(3, 'little'),
-                                   timeout_ms=timeout_ms, label="Block-Erase")
+                                   timeout_ms=timeout_ms, label=f"Block-Erase @0x{sa:06x}")
 
     def block_blank_check(self, sa: int, ea: int, timeout_ms=2000) -> int:
         return self.command_status(COM_BLOCK_BLANK_CHECK, _addr_info(sa, ea),
@@ -257,7 +257,7 @@ class ProtoA:
             last = (off + 256 >= total)
             frame = build_data_frame(chunk, last=last)
             self.link.send(frame, label=f"data @0x{sa + off:06x}")
-            status = self._read_frame(timeout_ms=timeout_ms, label="data-ack")
+            status = self._read_frame(timeout_ms=timeout_ms, label=f"data-ack @0x{sa + off:06x}")
             if len(status) != 2:
                 raise ProtoError(f"Programming: expected two status bytes, got {status.hex(' ')}")
             for st in status:
