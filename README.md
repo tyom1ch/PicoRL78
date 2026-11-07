@@ -1,4 +1,4 @@
-# PicoRL78 — Pico → RL78/F13 OCD
+# PicoRL78 — Pico → RL78 OCD
 
 <img width="1544" height="213" alt="image" src="https://github.com/user-attachments/assets/cc08f13f-0809-4479-b400-baab3475180a" />
 
